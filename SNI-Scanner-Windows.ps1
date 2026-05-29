@@ -1,5 +1,5 @@
 # =========================================
-#   SNI Scanner - Windows (نسخه بهبود یافته)
+#   SNI Scanner - Windows 
 # =========================================
 
 param(
@@ -8,6 +8,7 @@ param(
     [int]$Timeout = 3,
     [int]$Retries = 2,
     [string]$Log = "scan_log.txt",
+    [string]$CsvOutput = "scan_results.csv",
     [switch]$IPCheck,
     [string]$ManualIP = ""
 )
@@ -23,9 +24,8 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     exit 1
 }
 
-Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
+$PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
-# ایجاد فایل نمونه در صورت عدم وجود
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
@@ -34,38 +34,16 @@ example.com
 cloudflare.com
 1.1.1.1
 "@ | Out-File -FilePath $File -Encoding UTF8
-    Write-Host "targets.txt created. Please edit it and run the script again." -ForegroundColor Yellow
+    Write-Host "targets.txt created. Edit it and run the script again." -ForegroundColor Yellow
     Start-Sleep 3
     exit
 }
-
-$PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
 if (Test-Path $Log) { Clear-Content $Log -Force }
 
 function Write-Log {
     param([string]$Message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp | $Message" | Out-File -FilePath $Log -Append -Encoding UTF8
-}
-
-function Get-PublicIP {
-    param([string]$Manual = "")
-    if ($Manual) { return $Manual }
-    Write-Host "Detecting your public IP..." -ForegroundColor Cyan
-    $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json")
-    foreach ($api in $apis) {
-        try {
-            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10 -UseBasicParsing
-            $ip = if ($r.ip) { $r.ip } else { $r }
-            if ($ip) {
-                Write-Host "[INFO] Auto Detected IP: $ip" -ForegroundColor Green
-                return $ip
-            }
-        } catch {}
-    }
-    Write-Host "[WARN] Could not detect public IP" -ForegroundColor Yellow
-    return $null
+    "$((Get-Date -Format "yyyy-MM-dd HH:mm:ss")) | $Message" | Out-File -FilePath $Log -Append -Encoding UTF8
 }
 
 function Check-Port {
@@ -74,66 +52,73 @@ function Check-Port {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
         $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
-        if ($wait) { 
-            $tcp.EndConnect($connect) | Out-Null 
-            $tcp.Close()
-            return $true 
-        }
+        if ($wait) { $tcp.EndConnect($connect) | Out-Null }
         $tcp.Close()
-        return $false
-    } catch { 
-        return $false 
-    }
+        return $true
+    } catch { return $false }
 }
 
 function Check-RealIP {
     param($Domain, $PublicIP)
     try {
         $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" `
-            -Headers @{"Host"=$Domain} `
-            -TimeoutSec 12 `
-            -SkipCertificateCheck `
-            -UseBasicParsing
+            -Headers @{"Host"=$Domain} -TimeoutSec 8 -SkipCertificateCheck -UseBasicParsing
         $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
         if ($detected -eq $PublicIP) { " IP✔" } else { " IP✖($detected)" }
     } catch { " IP✖" }
 }
 
-# ===================== Main Scan =====================
-$PublicIP = $null
-if ($IPCheck) { $PublicIP = Get-PublicIP -Manual $ManualIP }
+$PublicIP = if ($IPCheck) {
+    Write-Host "Detecting your public IP..." -ForegroundColor Cyan
+    $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json")
+    foreach ($api in $apis) {
+        try {
+            $r = Invoke-RestMethod -Uri $api -TimeoutSec 8 -UseBasicParsing
+            $ip = if ($r.ip) { $r.ip } else { $r }
+            if ($ip) {
+                Write-Host "[INFO] Public IP: $ip" -ForegroundColor Green
+                return $ip
+            }
+        } catch {}
+    }
+    Write-Host "[WARN] Could not detect public IP" -ForegroundColor Yellow
+    $null
+} else { $null }
 
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
-Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
+Write-Log "Scan started | Targets: $($targets.Count) | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
-$results = @()
+$results = $targets | ForEach-Object -Parallel {
+    $target = $_
+    $PortList = $using:PortList
+    $Timeout = $using:Timeout
+    $Retries = $using:Retries
+    $PublicIP = $using:PublicIP
+    $IPCheck = $using:IPCheck
 
-foreach ($target in $targets) {
     try {
         $displayName = $target
         $ips = @()
 
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
+        
             $ips = @($target)
-            try {
-                $ptr = Resolve-DnsName -Name $target -Type PTR -ErrorAction SilentlyContinue
-                if ($ptr) { $displayName = "$target ($($ptr.NameHost))" }
-            } catch {}
         } 
         else {
+        
             $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
         }
 
         if (-not $ips) {
-            $results += "[ERROR] $target (Could not resolve)"
-            continue
+            "[ERROR] $target (Could not resolve)"
+            return
         }
 
         foreach ($ip in $ips) {
-            if ($ip -match '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|127\.|169\.254\.|fc00::|fe80::)') {
-                $results += "[FILTERED] $displayName -> $ip (Private/Internal IP)"
+            if ($ip -match '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|127\.|169\.254\.|::1|fc00::|fe80::)') {
+                "[FILTERED] $displayName -> $ip (Private IP)"
                 continue
             }
 
@@ -156,55 +141,45 @@ foreach ($target in $targets) {
                 }
             }
 
+            $ipResult = if ($IPCheck -and $PublicIP) { 
+                Check-RealIP -Domain $target -PublicIP $PublicIP 
+            } else { "" }
+
             if ($openCount -gt 0) {
-                $ipResult = if ($IPCheck -and $PublicIP) { 
-                    Check-RealIP -Domain $target -PublicIP $PublicIP 
-                } else { "" }
-                $results += "[OK] $resultStr$ipResult"
+                "[OK] $resultStr$ipResult"
             } else {
-                $results += "[FAIL] $resultStr"
+                "[FAIL] $resultStr"
             }
         }
     } 
     catch {
-        $results += "[ERROR] $target - $($_.Exception.Message)"
+        "[ERROR] $target - $($_.Exception.Message)"
     }
-}
+} -ThrottleLimit 20
 
-# نمایش نتایج + ذخیره در فایل
 $results | ForEach-Object {
     $_ | Out-File $Log -Append -Encoding UTF8
     Write-Host $_
 }
 
-# ===================== Final Summary =====================
+$results | ForEach-Object {
+    if ($_ -match '^\[(.+?)\] (.+?) -> (.+?) ->(.+)$') {
+        [PSCustomObject]@{
+            Status     = $matches[1]
+            Target     = $matches[2]
+            IP         = $matches[3]
+            Ports      = $matches[4].Trim()
+            Timestamp  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        }
+    }
+} | Export-Csv -Path $CsvOutput -NoTypeInformation -Encoding UTF8
+
 $OK_COUNT = ($results | Where-Object { $_ -match '^\[OK\]' }).Count
-$FAIL_COUNT = ($results | Where-Object { $_ -match '^\[FAIL\]' }).Count
-$FILTERED_COUNT = ($results | Where-Object { $_ -match '^\[FILTERED\]' }).Count
-$ERROR_COUNT = ($results | Where-Object { $_ -match '^\[ERROR\]' }).Count
 
 @"
-
----------------------------------------------------
-===================================================
-                   FINAL SUMMARY                   
-===================================================
-
-=== OK (at least one open port) [$OK_COUNT] ===
-$($results | Where-Object { $_ -match '^\[OK\]' } | Out-String)
-
-=== FAIL (all ports closed) [$FAIL_COUNT] ===
-$($results | Where-Object { $_ -match '^\[FAIL\]' } | Out-String)
-
-=== RESOLVE FAILED [$ERROR_COUNT] ===
-$($results | Where-Object { $_ -match '^\[ERROR\]' } | Out-String)
-
-=== FILTERED [$FILTERED_COUNT] ===
-$($results | Where-Object { $_ -match '^\[FILTERED\]' } | Out-String)
-
 ---------------------------------------------------
 Scan completed at $(Get-Date)
+Results also exported to: $CsvOutput
 "@ | Out-File $Log -Append -Encoding UTF8
 
-Write-Host "`nFull scan activity and summary saved to: $Log" -ForegroundColor Green
-Write-Host "Done!" -ForegroundColor Cyan
+Write-Host "`nScan completed! Results saved to $Log and $CsvOutput" -ForegroundColor Green
