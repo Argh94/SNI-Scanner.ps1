@@ -1,5 +1,5 @@
 # =========================================
-#   SNI Scanner - Windows (نسخه پایدار و قوی)
+#   SNI Scanner - Windows (نسخه نهایی)
 # =========================================
 
 param(
@@ -18,38 +18,41 @@ Write-Host "         SNI Scanner - Windows           " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
 
-if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Host "Error: PowerShell 7 or higher is required." -ForegroundColor Red
-    exit 1
-}
-
 Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
 
-# Create targets.txt if not exists
+# ===================== Read Targets =====================
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
 # Put your domains or IPs here (one per line)
-example.com
 cloudflare.com
+google.com
 1.1.1.1
+chess.com
 "@ | Out-File -FilePath $File -Encoding UTF8
-    Write-Host "targets.txt created. Please fill it with your targets." -ForegroundColor Yellow
+    Write-Host "targets.txt created. Please edit it with your list." -ForegroundColor Yellow
     Start-Sleep 3
     exit
 }
 
+$rawTargets = Get-Content $File
+Write-Host "`nTargets loaded:" -ForegroundColor Yellow
+$rawTargets | ForEach-Object { Write-Host "  $_" }
+
+$targets = $rawTargets | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
+
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 if (Test-Path $Log) { Clear-Content $Log -Force }
 
+# ===================== Functions =====================
 function Get-PublicIP {
     param([string]$Manual = "")
     if ($Manual) { return $Manual }
-    Write-Host "Detecting your public IP..." -ForegroundColor Cyan
+    Write-Host "`nDetecting your public IP..." -ForegroundColor Cyan
     $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json")
     foreach ($api in $apis) {
         try {
-            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10 -ErrorAction Stop
+            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10
             $ip = if ($r.ip) { $r.ip } else { $r }
             if ($ip) {
                 Write-Host "[INFO] Auto Detected IP: $ip" -ForegroundColor Green
@@ -72,46 +75,30 @@ function Check-Port {
     } catch { return $false }
 }
 
-function Check-RealIP {
-    param($Domain, $IP, $PublicIP)
-    try {
-        $res = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" -Headers @{"Host"=$Domain} -TimeoutSec 10 -SkipCertificateCheck -UseBasicParsing
-        $detected = ($res.Content -split "`n" | Where-Object {$_ -like "ip=*"} | Select-Object -First 1) -replace "ip=",""
-        if ($detected -eq $PublicIP) { " IP✔" } else { " IP✖($detected)" }
-    } catch { " IP✖" }
-}
-
 # ===================== Main Scan =====================
 $PublicIP = if ($IPCheck) { Get-PublicIP -Manual $ManualIP }
 
-$targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
-
-Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
+Write-Host "`nStarting scan of $($targets.Count) targets..." -ForegroundColor Yellow
 
 foreach ($target in $targets) {
     $display = $target
-    $resolvedIPs = @()
+    $ips = @()
 
     try {
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
-            # اگر IP وارد شده باشد
-            $resolvedIPs = @($target)
+            # IP وارد شده
+            $ips = @($target)
             try {
                 $ptr = [System.Net.Dns]::GetHostEntry($target).HostName
                 if ($ptr -and $ptr -ne $target) { $display = "$target ($ptr)" }
             } catch {}
         } 
         else {
-            # اگر دامنه وارد شده باشد
-            $resolvedIPs = [System.Net.Dns]::GetHostAddresses($target) | ForEach-Object { $_.IPAddressToString }
+            # دامنه وارد شده
+            $ips = [System.Net.Dns]::GetHostAddresses($target) | Select-Object -ExpandProperty IPAddressToString
         }
 
-        if (-not $resolvedIPs) {
-            $msg = "[ERROR] $target (Could not resolve)"
-            Write-Host $msg -ForegroundColor Red
-            $msg | Out-File $Log -Append -Encoding UTF8
-            continue
-        }
+        if (-not $ips) { throw "Could not resolve" }
     }
     catch {
         $msg = "[ERROR] $target (Could not resolve)"
@@ -120,7 +107,7 @@ foreach ($target in $targets) {
         continue
     }
 
-    foreach ($ip in $resolvedIPs) {
+    foreach ($ip in $ips) {
         if ($ip -like "10.*") {
             $msg = "[FILTERED] $display -> $ip (Blocked/Internal IP)"
             Write-Host $msg -ForegroundColor Yellow
@@ -148,15 +135,13 @@ foreach ($target in $targets) {
         }
 
         if ($openCount -gt 0) {
-            $ipCheckResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
-            $final = "[OK] $line$ipCheckResult"
+            $final = "[OK] $line"
             Write-Host $final -ForegroundColor Green
-            $final | Out-File $Log -Append -Encoding UTF8
         } else {
             $final = "[FAIL] $line"
             Write-Host $final -ForegroundColor Red
-            $final | Out-File $Log -Append -Encoding UTF8
         }
+        $final | Out-File $Log -Append -Encoding UTF8
     }
 }
 
@@ -164,8 +149,8 @@ foreach ($target in $targets) {
 $logContent = Get-Content $Log
 $OK_COUNT = ($logContent | Where-Object { $_ -match '^\[OK\]' }).Count
 $FAIL_COUNT = ($logContent | Where-Object { $_ -match '^\[FAIL\]' }).Count
-$FILTERED_COUNT = ($logContent | Where-Object { $_ -match '^\[FILTERED\]' }).Count
 $ERROR_COUNT = ($logContent | Where-Object { $_ -match '^\[ERROR\]' }).Count
+$FILTERED_COUNT = ($logContent | Where-Object { $_ -match '^\[FILTERED\]' }).Count
 
 @"
 
