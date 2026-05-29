@@ -3,3 +3,15 @@
 hcaptcha.com
 www.sciencedirect.com
 auth.vercel.com
+hcaptcha.com
+xxrf.bid
+static.cloudflareinsights.com
+kudabola.co
+krenarerugova.com
+chess.com
+hornbill.asia
+letsencrypt.org
+yamahacentreamsterdam.nl
+auth.vercel.com
+mabryautomotive.com
+kudabola.com
