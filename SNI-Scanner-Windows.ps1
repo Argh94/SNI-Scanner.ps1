@@ -25,7 +25,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
 
-# Create sample targets.txt
+# ایجاد فایل نمونه در صورت عدم وجود
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
@@ -34,12 +34,11 @@ example.com
 cloudflare.com
 1.1.1.1
 "@ | Out-File -FilePath $File -Encoding UTF8
-    Write-Host "targets.txt created. Edit it and run again." -ForegroundColor Yellow
+    Write-Host "targets.txt created. Please edit it and run the script again." -ForegroundColor Yellow
     Start-Sleep 3
     exit
 }
 
-$Concurrency = 25
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
 if (Test-Path $Log) { Clear-Content $Log -Force }
@@ -57,7 +56,7 @@ function Get-PublicIP {
     $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json")
     foreach ($api in $apis) {
         try {
-            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10
+            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10 -UseBasicParsing
             $ip = if ($r.ip) { $r.ip } else { $r }
             if ($ip) {
                 Write-Host "[INFO] Auto Detected IP: $ip" -ForegroundColor Green
@@ -65,6 +64,7 @@ function Get-PublicIP {
             }
         } catch {}
     }
+    Write-Host "[WARN] Could not detect public IP" -ForegroundColor Yellow
     return $null
 }
 
@@ -74,16 +74,26 @@ function Check-Port {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
         $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
-        if ($wait) { $tcp.EndConnect($connect) | Out-Null }
+        if ($wait) { 
+            $tcp.EndConnect($connect) | Out-Null 
+            $tcp.Close()
+            return $true 
+        }
         $tcp.Close()
-        return $true
-    } catch { return $false }
+        return $false
+    } catch { 
+        return $false 
+    }
 }
 
 function Check-RealIP {
-    param($Domain, $IP, $PublicIP)
+    param($Domain, $PublicIP)
     try {
-        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" -Headers @{"Host"=$Domain} -TimeoutSec 12 -SkipCertificateCheck -UseBasicParsing
+        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" `
+            -Headers @{"Host"=$Domain} `
+            -TimeoutSec 12 `
+            -SkipCertificateCheck `
+            -UseBasicParsing
         $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
         if ($detected -eq $PublicIP) { " IP✔" } else { " IP✖($detected)" }
     } catch { " IP✖" }
@@ -98,39 +108,32 @@ $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | F
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
 Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
-$results = $targets | ForEach-Object -Parallel {
-    $target = $_
-    $PortList = $using:PortList
-    $Timeout = $using:Timeout
-    $Retries = $using:Retries
-    $PublicIP = $using:PublicIP
-    $IPCheck = $using:IPCheck
-    $Log = $using:Log
+$results = @()
 
+foreach ($target in $targets) {
     try {
         $displayName = $target
         $ips = @()
 
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
-            # Input is IP → Try reverse DNS
             $ips = @($target)
             try {
                 $ptr = Resolve-DnsName -Name $target -Type PTR -ErrorAction SilentlyContinue
                 if ($ptr) { $displayName = "$target ($($ptr.NameHost))" }
             } catch {}
-        } else {
-            # Input is Domain → Resolve IPs
+        } 
+        else {
             $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
         }
 
         if (-not $ips) {
-            "[ERROR] $target (Could not resolve)"
-            return
+            $results += "[ERROR] $target (Could not resolve)"
+            continue
         }
 
         foreach ($ip in $ips) {
-            if ($ip -like "10.*") {
-                "[FILTERED] $displayName -> $ip (Blocked/Internal IP)"
+            if ($ip -match '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|127\.|169\.254\.|fc00::|fe80::)') {
+                $results += "[FILTERED] $displayName -> $ip (Private/Internal IP)"
                 continue
             }
 
@@ -154,16 +157,19 @@ $results = $targets | ForEach-Object -Parallel {
             }
 
             if ($openCount -gt 0) {
-                $ipResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
-                "[OK] $resultStr$ipResult"
+                $ipResult = if ($IPCheck -and $PublicIP) { 
+                    Check-RealIP -Domain $target -PublicIP $PublicIP 
+                } else { "" }
+                $results += "[OK] $resultStr$ipResult"
             } else {
-                "[FAIL] $resultStr"
+                $results += "[FAIL] $resultStr"
             }
         }
-    } catch {
-        "[ERROR] $target"
+    } 
+    catch {
+        $results += "[ERROR] $target - $($_.Exception.Message)"
     }
-} -ThrottleLimit $Concurrency
+}
 
 # نمایش نتایج + ذخیره در فایل
 $results | ForEach-Object {
@@ -197,7 +203,7 @@ $($results | Where-Object { $_ -match '^\[ERROR\]' } | Out-String)
 $($results | Where-Object { $_ -match '^\[FILTERED\]' } | Out-String)
 
 ---------------------------------------------------
-Scan fully completed at $(Get-Date)
+Scan completed at $(Get-Date)
 "@ | Out-File $Log -Append -Encoding UTF8
 
 Write-Host "`nFull scan activity and summary saved to: $Log" -ForegroundColor Green
