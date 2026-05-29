@@ -1,5 +1,5 @@
 # =========================================
-#   SNI Scanner - Windows 
+#   SNI Scanner - Windows (نسخه بهبود یافته)
 # =========================================
 
 param(
@@ -13,68 +13,48 @@ param(
 )
 
 Clear-Host
-
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "         SNI Scanner - Windows           " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Host "PowerShell 7 or higher is required." -ForegroundColor Red
-    Write-Host "Trying to install PowerShell 7 automatically..." -ForegroundColor Yellow
-    
-    try {
-        if (Get-Command winget -ErrorAction SilentlyContinue) {
-            winget install --id Microsoft.PowerShell --silent --accept-source-agreements --accept-package-agreements
-        } else {
-            Write-Host "Downloading PowerShell 7 installer..." -ForegroundColor Yellow
-            $url = "https://github.com/PowerShell/PowerShell/releases/latest/download/PowerShell-7.5.0-win-x64.msi"
-            Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\PS7.msi"
-            Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\PS7.msi`" /quiet /qn ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=1 ADD_PATH=1" -Wait
-        }
-        Write-Host "PowerShell 7 installed. Please close this window and run the script again using 'pwsh'." -ForegroundColor Green
-        Start-Sleep 6
-        exit 0
-    } catch {
-        Write-Host "Auto-install failed. Please install PowerShell 7 manually from Microsoft website." -ForegroundColor Red
-        exit 1
-    }
+    Write-Host "Error: PowerShell 7 or higher is required." -ForegroundColor Red
+    exit 1
 }
 
 Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
 
-# ===================== Create targets.txt if not exists =====================
+# Create sample targets.txt
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
 # Put your domains or IPs here (one per line)
 example.com
 cloudflare.com
-your-domain.com
+1.1.1.1
 "@ | Out-File -FilePath $File -Encoding UTF8
-    Write-Host "targets.txt created. Please edit it with your list and run the script again." -ForegroundColor Yellow
-    Start-Sleep 4
+    Write-Host "targets.txt created. Edit it and run again." -ForegroundColor Yellow
+    Start-Sleep 3
     exit
 }
 
-# ===================== Functions =====================
-$Concurrency = 30
+$Concurrency = 25
+$PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
+
+if (Test-Path $Log) { Clear-Content $Log -Force }
 
 function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     "$timestamp | $Message" | Out-File -FilePath $Log -Append -Encoding UTF8
-    Write-Host "[$timestamp] $Message"
 }
 
 function Get-PublicIP {
     param([string]$Manual = "")
-    if ($Manual) { 
-        Write-Host "[INFO] Using Manual IP: $Manual" -ForegroundColor Cyan
-        return $Manual 
-    }
+    if ($Manual) { return $Manual }
     Write-Host "Detecting your public IP..." -ForegroundColor Cyan
-    $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json", "https://ipinfo.io/json")
+    $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json")
     foreach ($api in $apis) {
         try {
             $r = Invoke-RestMethod -Uri $api -TimeoutSec 10
@@ -85,51 +65,40 @@ function Get-PublicIP {
             }
         } catch {}
     }
-    Write-Host "[WARNING] Could not detect public IP" -ForegroundColor Yellow
     return $null
 }
 
 function Check-Port {
     param($IP, $Port, $TimeoutSec)
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
-    $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
-    if ($wait) {
-        try { $tcp.EndConnect($connect) | Out-Null } catch {}
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
+        $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
+        if ($wait) { $tcp.EndConnect($connect) | Out-Null }
         $tcp.Close()
         return $true
-    } else {
-        $tcp.Close()
-        return $false
-    }
+    } catch { return $false }
 }
 
 function Check-RealIP {
     param($Domain, $IP, $PublicIP)
     try {
-        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" `
-            -Headers @{"Host"=$Domain} -TimeoutSec 12 -SkipCertificateCheck -UseBasicParsing
+        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" -Headers @{"Host"=$Domain} -TimeoutSec 12 -SkipCertificateCheck -UseBasicParsing
         $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
-        if ($detected -eq $PublicIP) { return " IP✔" } else { return " IP✖($detected)" }
-    } catch { return " IP✖" }
+        if ($detected -eq $PublicIP) { " IP✔" } else { " IP✖($detected)" }
+    } catch { " IP✖" }
 }
 
-# ===================== Start Scanning =====================
-if (Test-Path $Log) { Clear-Content $Log -Force }
-
-$PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
-
+# ===================== Main Scan =====================
 $PublicIP = $null
-if ($IPCheck) {
-    $PublicIP = Get-PublicIP -Manual $ManualIP
-}
+if ($IPCheck) { $PublicIP = Get-PublicIP -Manual $ManualIP }
 
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
 Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
-$targets | ForEach-Object -Parallel {
+$results = $targets | ForEach-Object -Parallel {
     $target = $_
     $PortList = $using:PortList
     $Timeout = $using:Timeout
@@ -139,25 +108,34 @@ $targets | ForEach-Object -Parallel {
     $Log = $using:Log
 
     try {
+        $displayName = $target
+        $ips = @()
+
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
+            # Input is IP → Try reverse DNS
             $ips = @($target)
+            try {
+                $ptr = Resolve-DnsName -Name $target -Type PTR -ErrorAction SilentlyContinue
+                if ($ptr) { $displayName = "$target ($($ptr.NameHost))" }
+            } catch {}
         } else {
+            # Input is Domain → Resolve IPs
             $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
         }
 
         if (-not $ips) {
-            "[ERROR] $target (Could not resolve)" | Out-File $Log -Append -Encoding UTF8
+            "[ERROR] $target (Could not resolve)"
             return
         }
 
         foreach ($ip in $ips) {
             if ($ip -like "10.*") {
-                "[FILTERED] $target -> $ip (Blocked/Internal IP)" | Out-File $Log -Append -Encoding UTF8
+                "[FILTERED] $displayName -> $ip (Blocked/Internal IP)"
                 continue
             }
 
+            $resultStr = "$displayName -> $ip ->"
             $openCount = 0
-            $resultStr = "$target -> $ip ->"
 
             foreach ($port in $PortList) {
                 $isOpen = $false
@@ -177,21 +155,27 @@ $targets | ForEach-Object -Parallel {
 
             if ($openCount -gt 0) {
                 $ipResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
-                "[OK] $resultStr$ipResult" | Out-File $Log -Append -Encoding UTF8
+                "[OK] $resultStr$ipResult"
             } else {
-                "[FAIL] $resultStr" | Out-File $Log -Append -Encoding UTF8
+                "[FAIL] $resultStr"
             }
         }
     } catch {
-        "[ERROR] $target" | Out-File $Log -Append -Encoding UTF8
+        "[ERROR] $target"
     }
 } -ThrottleLimit $Concurrency
 
-# ===================== Final Summary (مثل لینوکس) =====================
-$OK_COUNT = (Select-String -Path $Log -Pattern "^\[OK\]" -AllMatches).Count
-$FAIL_COUNT = (Select-String -Path $Log -Pattern "^\[FAIL\]" -AllMatches).Count
-$FILTERED_COUNT = (Select-String -Path $Log -Pattern "^\[FILTERED\]" -AllMatches).Count
-$ERROR_COUNT = (Select-String -Path $Log -Pattern "^\[ERROR\]" -AllMatches).Count
+# نمایش نتایج + ذخیره در فایل
+$results | ForEach-Object {
+    $_ | Out-File $Log -Append -Encoding UTF8
+    Write-Host $_
+}
+
+# ===================== Final Summary =====================
+$OK_COUNT = ($results | Where-Object { $_ -match '^\[OK\]' }).Count
+$FAIL_COUNT = ($results | Where-Object { $_ -match '^\[FAIL\]' }).Count
+$FILTERED_COUNT = ($results | Where-Object { $_ -match '^\[FILTERED\]' }).Count
+$ERROR_COUNT = ($results | Where-Object { $_ -match '^\[ERROR\]' }).Count
 
 @"
 
@@ -201,16 +185,16 @@ $ERROR_COUNT = (Select-String -Path $Log -Pattern "^\[ERROR\]" -AllMatches).Coun
 ===================================================
 
 === OK (at least one open port) [$OK_COUNT] ===
-$((Get-Content $Log | Where-Object { $_ -match '^\[OK\]' }) -join "`n")
+$($results | Where-Object { $_ -match '^\[OK\]' } | Out-String)
 
 === FAIL (all ports closed) [$FAIL_COUNT] ===
-$((Get-Content $Log | Where-Object { $_ -match '^\[FAIL\]' }) -join "`n")
+$($results | Where-Object { $_ -match '^\[FAIL\]' } | Out-String)
 
 === RESOLVE FAILED [$ERROR_COUNT] ===
-$((Get-Content $Log | Where-Object { $_ -match '^\[ERROR\]' }) -join "`n")
+$($results | Where-Object { $_ -match '^\[ERROR\]' } | Out-String)
 
-=== FILTERED (Blocked/IP 10.x) [$FILTERED_COUNT] ===
-$((Get-Content $Log | Where-Object { $_ -match '^\[FILTERED\]' }) -join "`n")
+=== FILTERED [$FILTERED_COUNT] ===
+$($results | Where-Object { $_ -match '^\[FILTERED\]' } | Out-String)
 
 ---------------------------------------------------
 Scan fully completed at $(Get-Date)
