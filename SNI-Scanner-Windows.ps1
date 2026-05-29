@@ -5,8 +5,8 @@
 param(
     [string]$File = "targets.txt",
     [string]$Ports = "443,2053,2083,2087,2096,8443",
-    [int]$Timeout = 5,
-    [int]$Retries = 3,
+    [int]$Timeout = 3,
+    [int]$Retries = 2,
     [string]$Log = "scan_log.txt",
     [switch]$IPCheck,
     [string]$ManualIP = ""
