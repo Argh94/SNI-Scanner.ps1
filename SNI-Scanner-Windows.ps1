@@ -1,5 +1,5 @@
 # =========================================
-#   SNI Scanner - Windows (نسخه پایدار نهایی)
+#   SNI Scanner - Windows (نسخه پایدار و قوی)
 # =========================================
 
 param(
@@ -25,7 +25,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
 
-# Create sample targets.txt
+# Create targets.txt if not exists
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
@@ -34,19 +34,13 @@ example.com
 cloudflare.com
 1.1.1.1
 "@ | Out-File -FilePath $File -Encoding UTF8
-    Write-Host "Please edit targets.txt with your real domains/IPs" -ForegroundColor Yellow
+    Write-Host "targets.txt created. Please fill it with your targets." -ForegroundColor Yellow
     Start-Sleep 3
     exit
 }
 
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 if (Test-Path $Log) { Clear-Content $Log -Force }
-
-function Write-Log {
-    param([string]$Message)
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp | $Message" | Out-File -FilePath $Log -Append -Encoding UTF8
-}
 
 function Get-PublicIP {
     param([string]$Manual = "")
@@ -55,7 +49,7 @@ function Get-PublicIP {
     $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json")
     foreach ($api in $apis) {
         try {
-            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10
+            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10 -ErrorAction Stop
             $ip = if ($r.ip) { $r.ip } else { $r }
             if ($ip) {
                 Write-Host "[INFO] Auto Detected IP: $ip" -ForegroundColor Green
@@ -93,74 +87,76 @@ $PublicIP = if ($IPCheck) { Get-PublicIP -Manual $ManualIP }
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
-Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
 foreach ($target in $targets) {
-    try {
-        $display = $target
-        $ips = @()
+    $display = $target
+    $resolvedIPs = @()
 
-        if ($target -match '^\d+\.\d+\.\d+\.\d+$') {
-            # IP وارد شده
-            $ips = @($target)
+    try {
+        if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
+            # اگر IP وارد شده باشد
+            $resolvedIPs = @($target)
             try {
-                $ptr = Resolve-DnsName -Name $target -Type PTR -ErrorAction SilentlyContinue
-                if ($ptr) { $display = "$target ($($ptr.NameHost))" }
+                $ptr = [System.Net.Dns]::GetHostEntry($target).HostName
+                if ($ptr -and $ptr -ne $target) { $display = "$target ($ptr)" }
             } catch {}
-        } else {
-            # دامنه وارد شده
-            $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
+        } 
+        else {
+            # اگر دامنه وارد شده باشد
+            $resolvedIPs = [System.Net.Dns]::GetHostAddresses($target) | ForEach-Object { $_.IPAddressToString }
         }
 
-        if (-not $ips) {
+        if (-not $resolvedIPs) {
             $msg = "[ERROR] $target (Could not resolve)"
             Write-Host $msg -ForegroundColor Red
             $msg | Out-File $Log -Append -Encoding UTF8
             continue
         }
-
-        foreach ($ip in $ips) {
-            if ($ip -like "10.*") {
-                $msg = "[FILTERED] $display -> $ip (Blocked/Internal IP)"
-                Write-Host $msg -ForegroundColor Yellow
-                $msg | Out-File $Log -Append -Encoding UTF8
-                continue
-            }
-
-            $line = "$display -> $ip ->"
-            $openCount = 0
-
-            foreach ($port in $PortList) {
-                $isOpen = $false
-                for ($i = 1; $i -le $Retries; $i++) {
-                    if (Check-Port -IP $ip -Port $port -TimeoutSec $Timeout) {
-                        $isOpen = $true
-                        break
-                    }
-                }
-                if ($isOpen) {
-                    $line += " ${port}✔"
-                    $openCount++
-                } else {
-                    $line += " ${port}✖"
-                }
-            }
-
-            if ($openCount -gt 0) {
-                $ipCheckResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
-                $final = "[OK] $line$ipCheckResult"
-                Write-Host $final -ForegroundColor Green
-                $final | Out-File $Log -Append -Encoding UTF8
-            } else {
-                $final = "[FAIL] $line"
-                Write-Host $final -ForegroundColor Red
-                $final | Out-File $Log -Append -Encoding UTF8
-            }
-        }
-    } catch {
-        $msg = "[ERROR] $target"
+    }
+    catch {
+        $msg = "[ERROR] $target (Could not resolve)"
         Write-Host $msg -ForegroundColor Red
         $msg | Out-File $Log -Append -Encoding UTF8
+        continue
+    }
+
+    foreach ($ip in $resolvedIPs) {
+        if ($ip -like "10.*") {
+            $msg = "[FILTERED] $display -> $ip (Blocked/Internal IP)"
+            Write-Host $msg -ForegroundColor Yellow
+            $msg | Out-File $Log -Append -Encoding UTF8
+            continue
+        }
+
+        $line = "$display -> $ip ->"
+        $openCount = 0
+
+        foreach ($port in $PortList) {
+            $isOpen = $false
+            for ($i = 1; $i -le $Retries; $i++) {
+                if (Check-Port -IP $ip -Port $port -TimeoutSec $Timeout) {
+                    $isOpen = $true
+                    break
+                }
+            }
+            if ($isOpen) {
+                $line += " ${port}✔"
+                $openCount++
+            } else {
+                $line += " ${port}✖"
+            }
+        }
+
+        if ($openCount -gt 0) {
+            $ipCheckResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
+            $final = "[OK] $line$ipCheckResult"
+            Write-Host $final -ForegroundColor Green
+            $final | Out-File $Log -Append -Encoding UTF8
+        } else {
+            $final = "[FAIL] $line"
+            Write-Host $final -ForegroundColor Red
+            $final | Out-File $Log -Append -Encoding UTF8
+        }
     }
 }
 
