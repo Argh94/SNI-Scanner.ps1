@@ -1,4 +1,4 @@
-# SNI Scanner for Windows
+# SNI Scanner for Windows - Clean Version
 
 param(
     [string]$File = "targets.txt",
@@ -21,25 +21,25 @@ Write-Host ""
 function Install-Dependencies {
     Write-Host "Checking prerequisites..." -ForegroundColor Yellow
 
-    # Check PowerShell Version
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         Write-Host "Error: PowerShell 7 or higher is required." -ForegroundColor Red
-        Write-Host "Please install PowerShell 7 and run this script again." -ForegroundColor Yellow
+        Write-Host "Please install PowerShell 7 and run again." -ForegroundColor Yellow
         exit 1
     } else {
         Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
     }
 
-    # Create targets.txt if it doesn't exist
     if (-not (Test-Path $File)) {
-        Write-Host "Creating sample $File ..." -ForegroundColor Yellow
+        Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
         @"
 # Enter one domain or IP per line
+# Lines starting with # will be ignored
+
 example.com
 sub.example.com
 185.22.34.56
 "@ | Out-File -FilePath $File -Encoding UTF8
-        Write-Host "Sample $File created." -ForegroundColor Green
+        Write-Host "Sample targets.txt created." -ForegroundColor Green
     }
 
     if (Test-Path $Log) { Clear-Content $Log -Force }
@@ -47,7 +47,6 @@ sub.example.com
     Write-Host "All prerequisites are ready.`n" -ForegroundColor Green
 }
 
-# Run setup
 Install-Dependencies
 
 # ====================== Configuration ======================
@@ -128,12 +127,12 @@ function Check-RealIP {
         $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
         
         if ($detected -eq $PublicIP) {
-            return " IP✔"
+            return " IP-OK"
         } else {
-            return " IP✖($detected)"
+            return " IP-X($detected)"
         }
     } catch {
-        return " IP✖"
+        return " IP-X"
     }
 }
 
@@ -147,7 +146,7 @@ if ($IPCheck) {
 
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
-Write-Host "Starting scan of $($targets.Count) targets on $($PortList.Count) ports..." -ForegroundColor Yellow
+Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
 Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
 $targets | ForEach-Object -Parallel {
@@ -160,7 +159,6 @@ $targets | ForEach-Object -Parallel {
     $Log = $using:Log
 
     try {
-        # DNS Resolution
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
             $ips = @($target)
         } else {
@@ -191,10 +189,10 @@ $targets | ForEach-Object -Parallel {
                 }
 
                 if ($isOpen) {
-                    $resultStr += " ${port}✔"
+                    $resultStr += " ${port}-OK"
                     $openCount++
                 } else {
-                    $resultStr += " ${port}✖"
+                    $resultStr += " ${port}-X"
                 }
             }
 
