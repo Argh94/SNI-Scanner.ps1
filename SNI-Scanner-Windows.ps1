@@ -1,5 +1,5 @@
 # =========================================
-#   SNI Scanner - Windows (نسخه نهایی)
+#   SNI Scanner - Windows (نسخه پایدار نهایی)
 # =========================================
 
 param(
@@ -25,6 +25,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
 
+# Create sample targets.txt
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
@@ -33,14 +34,12 @@ example.com
 cloudflare.com
 1.1.1.1
 "@ | Out-File -FilePath $File -Encoding UTF8
-    Write-Host "targets.txt created. Please edit it with your list." -ForegroundColor Yellow
+    Write-Host "Please edit targets.txt with your real domains/IPs" -ForegroundColor Yellow
     Start-Sleep 3
     exit
 }
 
-$Concurrency = 20
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
-
 if (Test-Path $Log) { Clear-Content $Log -Force }
 
 function Write-Log {
@@ -72,7 +71,7 @@ function Check-Port {
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
-        $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec*1000, $false)
+        $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
         if ($wait) { $tcp.EndConnect($connect) | Out-Null }
         $tcp.Close()
         return $true
@@ -88,7 +87,7 @@ function Check-RealIP {
     } catch { " IP✖" }
 }
 
-# ===================== Start =====================
+# ===================== Main Scan =====================
 $PublicIP = if ($IPCheck) { Get-PublicIP -Manual $ManualIP }
 
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
@@ -96,38 +95,35 @@ $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | F
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
 Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
-$allResults = @()
-
-$targets | ForEach-Object -Parallel {
-    $target = $_
-    $PortList = $using:PortList
-    $Timeout = $using:Timeout
-    $Retries = $using:Retries
-    $PublicIP = $using:PublicIP
-    $IPCheck = $using:IPCheck
-
+foreach ($target in $targets) {
     try {
         $display = $target
         $ips = @()
 
         if ($target -match '^\d+\.\d+\.\d+\.\d+$') {
+            # IP وارد شده
             $ips = @($target)
             try {
-                $ptr = Resolve-DnsName $target -Type PTR -ErrorAction SilentlyContinue
+                $ptr = Resolve-DnsName -Name $target -Type PTR -ErrorAction SilentlyContinue
                 if ($ptr) { $display = "$target ($($ptr.NameHost))" }
             } catch {}
         } else {
-            $ips = (Resolve-DnsName $target -Type A -ErrorAction SilentlyContinue).IPAddress
+            # دامنه وارد شده
+            $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
         }
 
         if (-not $ips) {
-            "[ERROR] $target (Could not resolve)"
-            return
+            $msg = "[ERROR] $target (Could not resolve)"
+            Write-Host $msg -ForegroundColor Red
+            $msg | Out-File $Log -Append -Encoding UTF8
+            continue
         }
 
         foreach ($ip in $ips) {
             if ($ip -like "10.*") {
-                "[FILTERED] $display -> $ip (Blocked/Internal IP)"
+                $msg = "[FILTERED] $display -> $ip (Blocked/Internal IP)"
+                Write-Host $msg -ForegroundColor Yellow
+                $msg | Out-File $Log -Append -Encoding UTF8
                 continue
             }
 
@@ -136,7 +132,7 @@ $targets | ForEach-Object -Parallel {
 
             foreach ($port in $PortList) {
                 $isOpen = $false
-                for ($i=1; $i -le $Retries; $i++) {
+                for ($i = 1; $i -le $Retries; $i++) {
                     if (Check-Port -IP $ip -Port $port -TimeoutSec $Timeout) {
                         $isOpen = $true
                         break
@@ -152,25 +148,28 @@ $targets | ForEach-Object -Parallel {
 
             if ($openCount -gt 0) {
                 $ipCheckResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
-                "[OK] $line$ipCheckResult"
+                $final = "[OK] $line$ipCheckResult"
+                Write-Host $final -ForegroundColor Green
+                $final | Out-File $Log -Append -Encoding UTF8
             } else {
-                "[FAIL] $line"
+                $final = "[FAIL] $line"
+                Write-Host $final -ForegroundColor Red
+                $final | Out-File $Log -Append -Encoding UTF8
             }
         }
     } catch {
-        "[ERROR] $target"
+        $msg = "[ERROR] $target"
+        Write-Host $msg -ForegroundColor Red
+        $msg | Out-File $Log -Append -Encoding UTF8
     }
-} -ThrottleLimit $Concurrency | ForEach-Object {
-    $allResults += $_
-    $_ | Out-File $Log -Append -Encoding UTF8
-    Write-Host $_
 }
 
 # ===================== Final Summary =====================
-$OK_COUNT = ($allResults | Where-Object { $_ -match '^\[OK\]' }).Count
-$FAIL_COUNT = ($allResults | Where-Object { $_ -match '^\[FAIL\]' }).Count
-$FILTERED_COUNT = ($allResults | Where-Object { $_ -match '^\[FILTERED\]' }).Count
-$ERROR_COUNT = ($allResults | Where-Object { $_ -match '^\[ERROR\]' }).Count
+$logContent = Get-Content $Log
+$OK_COUNT = ($logContent | Where-Object { $_ -match '^\[OK\]' }).Count
+$FAIL_COUNT = ($logContent | Where-Object { $_ -match '^\[FAIL\]' }).Count
+$FILTERED_COUNT = ($logContent | Where-Object { $_ -match '^\[FILTERED\]' }).Count
+$ERROR_COUNT = ($logContent | Where-Object { $_ -match '^\[ERROR\]' }).Count
 
 @"
 
@@ -180,16 +179,16 @@ $ERROR_COUNT = ($allResults | Where-Object { $_ -match '^\[ERROR\]' }).Count
 ===================================================
 
 === OK (at least one open port) [$OK_COUNT] ===
-$($allResults | Where-Object { $_ -match '^\[OK\]' } | Out-String)
+$($logContent | Where-Object { $_ -match '^\[OK\]' } | Out-String)
 
 === FAIL (all ports closed) [$FAIL_COUNT] ===
-$($allResults | Where-Object { $_ -match '^\[FAIL\]' } | Out-String)
+$($logContent | Where-Object { $_ -match '^\[FAIL\]' } | Out-String)
 
 === RESOLVE FAILED [$ERROR_COUNT] ===
-$($allResults | Where-Object { $_ -match '^\[ERROR\]' } | Out-String)
+$($logContent | Where-Object { $_ -match '^\[ERROR\]' } | Out-String)
 
 === FILTERED [$FILTERED_COUNT] ===
-$($allResults | Where-Object { $_ -match '^\[FILTERED\]' } | Out-String)
+$($logContent | Where-Object { $_ -match '^\[FILTERED\]' } | Out-String)
 
 ---------------------------------------------------
 Scan fully completed at $(Get-Date)
