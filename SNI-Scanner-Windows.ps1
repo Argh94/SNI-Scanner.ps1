@@ -1,5 +1,5 @@
 # =========================================
-#   SNI Scanner - Windows (نسخه نهایی و پایدار)
+#   SNI Scanner - Windows 
 # =========================================
 
 param(
@@ -26,7 +26,6 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
-# ایجاد فایل نمونه در صورت عدم وجود
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
@@ -42,7 +41,6 @@ google.com
 
 if (Test-Path $Log) { Clear-Content $Log -Force }
 
-# ===================== Functions =====================
 function Check-Port {
     param($IP, $Port, $TimeoutSec)
     try {
@@ -71,7 +69,6 @@ function Check-RealIP {
     } catch { " IP✖" }
 }
 
-# ===================== Main =====================
 $PublicIP = $null
 if ($IPCheck) {
     Write-Host "Detecting your public IP..." -ForegroundColor Cyan
@@ -154,13 +151,11 @@ foreach ($target in $targets) {
     }
 }
 
-# نمایش نتایج + ذخیره در لاگ
 $results | ForEach-Object {
     $_ | Out-File $Log -Append -Encoding UTF8
     Write-Host $_
 }
 
-# خروجی CSV
 $results | ForEach-Object {
     if ($_ -match '^\[(.+?)\]\s*(.+?)\s*->\s*([^\s]+)\s*->(.+)$') {
         [PSCustomObject]@{
@@ -173,7 +168,6 @@ $results | ForEach-Object {
     }
 } | Export-Csv -Path $CsvOutput -NoTypeInformation -Encoding UTF8
 
-# Summary
 $OK_COUNT = ($results | Where-Object { $_ -match '^\[OK\]' }).Count
 $FAIL_COUNT = ($results | Where-Object { $_ -match '^\[FAIL\]' }).Count
 $ERROR_COUNT = ($results | Where-Object { $_ -match '^\[ERROR\]' }).Count
