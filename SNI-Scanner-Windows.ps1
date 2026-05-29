@@ -5,8 +5,8 @@
 param(
     [string]$File = "targets.txt",
     [string]$Ports = "443,2053,2083,2087,2096,8443",
-    [int]$Timeout = 3,
-    [int]$Retries = 2,
+    [int]$Timeout = 4,      # کاهش یافته
+    [int]$Retries = 1,      # کاهش یافته
     [string]$Log = "scan_log.txt",
     [string]$CsvOutput = "scan_results.csv",
     [switch]$IPCheck,
@@ -26,14 +26,13 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
-# ایجاد فایل نمونه در صورت نبودن
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
 # Put your domains or IPs here (one per line)
-example.com
-cloudflare.com
 1.1.1.1
+cloudflare.com
+google.com
 "@ | Out-File -FilePath $File -Encoding UTF8
     Write-Host "targets.txt created. Edit it and run again." -ForegroundColor Yellow
     Start-Sleep 3
@@ -41,11 +40,6 @@ cloudflare.com
 }
 
 if (Test-Path $Log) { Clear-Content $Log -Force }
-
-function Write-Log {
-    param([string]$Message)
-    "$((Get-Date -Format "yyyy-MM-dd HH:mm:ss")) | $Message" | Out-File -FilePath $Log -Append -Encoding UTF8
-}
 
 function Check-Port {
     param($IP, $Port, $TimeoutSec)
@@ -85,15 +79,12 @@ if ($IPCheck) {
             }
         } catch {}
     }
-    if (-not $PublicIP) {
-        Write-Host "[WARN] Could not detect public IP" -ForegroundColor Yellow
-    }
 }
 
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
-Write-Log "Scan started | Targets: $($targets.Count) | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
+Write-Host "Timeout: ${Timeout}s | Retries: $Retries | Parallel: 10`n" -ForegroundColor DarkGray
 
 $results = $targets | ForEach-Object -Parallel {
     $target = $_
@@ -110,7 +101,7 @@ $results = $targets | ForEach-Object -Parallel {
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
             $ips = @($target)
         } else {
-            $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
+            $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction Stop).IPAddress
         }
 
         if (-not $ips) {
@@ -155,52 +146,43 @@ $results = $targets | ForEach-Object -Parallel {
         }
     } 
     catch {
-        "[ERROR] $target"
+        "[ERROR] $target - $($_.Exception.Message)"
     }
-} -ThrottleLimit 20
+} -ThrottleLimit 10
 
-# نمایش نتایج روی صفحه + ذخیره در لاگ
+# نمایش و ذخیره نتایج
 $results | ForEach-Object {
     $_ | Out-File $Log -Append -Encoding UTF8
     Write-Host $_
 }
 
-# خروجی CSV
+# CSV Report
 $results | ForEach-Object {
-    if ($_ -match '^\[(.+?)\]\s+(.+?)\s+->\s+([\d\.]+)\s+->(.+)$') {
+    if ($_ -match '^\[(.+?)\]\s*(.+?)\s*->\s*([\d\.:]+)\s*->(.+)$') {
         [PSCustomObject]@{
-            Status    = $matches[1]
-            Target    = $matches[2].Trim()
-            IP        = $matches[3]
-            Ports     = $matches[4].Trim()
-            Time      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Status = $matches[1]
+            Target = $matches[2].Trim()
+            IP     = $matches[3]
+            Ports  = $matches[4].Trim()
+            Time   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         }
     }
 } | Export-Csv -Path $CsvOutput -NoTypeInformation -Encoding UTF8
 
-# ===================== Final Summary =====================
+# Summary
 $OK_COUNT = ($results | Where-Object { $_ -match '^\[OK\]' }).Count
 $FAIL_COUNT = ($results | Where-Object { $_ -match '^\[FAIL\]' }).Count
-$FILTERED_COUNT = ($results | Where-Object { $_ -match '^\[FILTERED\]' }).Count
 $ERROR_COUNT = ($results | Where-Object { $_ -match '^\[ERROR\]' }).Count
 
 @"
-
----------------------------------------------------
 ===================================================
-                   FINAL SUMMARY                   
+                  FINAL SUMMARY
 ===================================================
-
 OK     : $OK_COUNT
-FAIL   : $FAIL_COUNT
-FILTERED: $FILTERED_COUNT
+FAIL   : $FAIL_COUNT  
 ERROR  : $ERROR_COUNT
 
 Scan completed at $(Get-Date)
-CSV Report saved to: $CsvOutput
 "@ | Out-File $Log -Append -Encoding UTF8
 
-Write-Host "`nScan completed successfully!" -ForegroundColor Green
-Write-Host "Log file     : $Log" -ForegroundColor Cyan
-Write-Host "CSV Report   : $CsvOutput" -ForegroundColor Cyan
-Write-Host "Done!" -ForegroundColor Cyan
+Write-Host "`nScan completed! Check $CsvOutput for detailed report." -ForegroundColor Green
