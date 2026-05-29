@@ -1,4 +1,6 @@
-# SNI Scanner for Windows - Clean Version (No Special Characters)
+# =========================================
+#   SNI Scanner - Windows 
+# =========================================
 
 param(
     [string]$File = "targets.txt",
@@ -17,37 +19,47 @@ Write-Host "         SNI Scanner - Windows           " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Auto Setup
-function Install-Dependencies {
-    Write-Host "Checking prerequisites..." -ForegroundColor Yellow
-
-    if ($PSVersionTable.PSVersion.Major -lt 7) {
-        Write-Host "Error: PowerShell 7 or higher is required." -ForegroundColor Red
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "PowerShell 7 or higher is required." -ForegroundColor Red
+    Write-Host "Trying to install PowerShell 7 automatically..." -ForegroundColor Yellow
+    
+    try {
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id Microsoft.PowerShell --silent --accept-source-agreements --accept-package-agreements
+        } else {
+            Write-Host "Downloading PowerShell 7 installer..." -ForegroundColor Yellow
+            $url = "https://github.com/PowerShell/PowerShell/releases/latest/download/PowerShell-7.5.0-win-x64.msi"
+            Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\PS7.msi"
+            Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\PS7.msi`" /quiet /qn ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=1 ADD_PATH=1" -Wait
+        }
+        Write-Host "PowerShell 7 installed. Please close this window and run the script again using 'pwsh'." -ForegroundColor Green
+        Start-Sleep 6
+        exit 0
+    } catch {
+        Write-Host "Auto-install failed. Please install PowerShell 7 manually from Microsoft website." -ForegroundColor Red
         exit 1
-    } else {
-        Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
     }
-
-    if (-not (Test-Path $File)) {
-        Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
-        @"
-# Enter one domain or IP per line
-example.com
-sub.example.com
-185.22.34.56
-"@ | Out-File -FilePath $File -Encoding UTF8
-    }
-
-    if (Test-Path $Log) { Clear-Content $Log -Force }
-    Write-Host "Ready.`n" -ForegroundColor Green
 }
 
-Install-Dependencies
+Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
 
-# Configuration
-$Concurrency = 25
+# ===================== Create targets.txt if not exists =====================
+if (-not (Test-Path $File)) {
+    Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
+    @"
+# Put your domains or IPs here (one per line)
+example.com
+cloudflare.com
+your-domain.com
+"@ | Out-File -FilePath $File -Encoding UTF8
+    Write-Host "targets.txt created. Please edit it with your list and run the script again." -ForegroundColor Yellow
+    Start-Sleep 4
+    exit
+}
 
-# Functions
+# ===================== Functions =====================
+$Concurrency = 30
+
 function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -58,24 +70,22 @@ function Write-Log {
 function Get-PublicIP {
     param([string]$Manual = "")
     if ($Manual) { 
-        Write-Host "Using Manual IP: $Manual" -ForegroundColor Cyan
+        Write-Host "[INFO] Using Manual IP: $Manual" -ForegroundColor Cyan
         return $Manual 
     }
     Write-Host "Detecting your public IP..." -ForegroundColor Cyan
     $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json", "https://ipinfo.io/json")
     foreach ($api in $apis) {
         try {
-            $r = Invoke-WebRequest -Uri $api -TimeoutSec 10 -UseBasicParsing
-            if ($api -like "*chabokan*") { $ip = ($r.Content | ConvertFrom-Json).ip }
-            elseif ($api -like "*ipify*") { $ip = ($r.Content | ConvertFrom-Json).ip }
-            else { $ip = ($r.Content | ConvertFrom-Json).ip }
+            $r = Invoke-RestMethod -Uri $api -TimeoutSec 10
+            $ip = if ($r.ip) { $r.ip } else { $r }
             if ($ip) {
-                Write-Host "Public IP: $ip" -ForegroundColor Green
+                Write-Host "[INFO] Auto Detected IP: $ip" -ForegroundColor Green
                 return $ip
             }
         } catch {}
     }
-    Write-Host "Could not detect public IP." -ForegroundColor Yellow
+    Write-Host "[WARNING] Could not detect public IP" -ForegroundColor Yellow
     return $null
 }
 
@@ -97,13 +107,16 @@ function Check-Port {
 function Check-RealIP {
     param($Domain, $IP, $PublicIP)
     try {
-        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" -Headers @{"Host"=$Domain} -TimeoutSec 12 -SkipCertificateCheck -UseBasicParsing
+        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" `
+            -Headers @{"Host"=$Domain} -TimeoutSec 12 -SkipCertificateCheck -UseBasicParsing
         $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
-        if ($detected -eq $PublicIP) { return " IP-OK" } else { return " IP-X($detected)" }
-    } catch { return " IP-X" }
+        if ($detected -eq $PublicIP) { return " IP✔" } else { return " IP✖($detected)" }
+    } catch { return " IP✖" }
 }
 
-# Main Scan
+# ===================== Start Scanning =====================
+if (Test-Path $Log) { Clear-Content $Log -Force }
+
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
 $PublicIP = $null
@@ -114,7 +127,7 @@ if ($IPCheck) {
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
-Write-Log "Scan started | Targets: $File | Ports: $Ports"
+Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
 
 $targets | ForEach-Object -Parallel {
     $target = $_
@@ -139,7 +152,7 @@ $targets | ForEach-Object -Parallel {
 
         foreach ($ip in $ips) {
             if ($ip -like "10.*") {
-                "[FILTERED] $target -> $ip (Internal IP)" | Out-File $Log -Append -Encoding UTF8
+                "[FILTERED] $target -> $ip (Blocked/Internal IP)" | Out-File $Log -Append -Encoding UTF8
                 continue
             }
 
@@ -155,10 +168,10 @@ $targets | ForEach-Object -Parallel {
                     }
                 }
                 if ($isOpen) {
-                    $resultStr += " ${port}-OK"
+                    $resultStr += " ${port}✔"
                     $openCount++
                 } else {
-                    $resultStr += " ${port}-X"
+                    $resultStr += " ${port}✖"
                 }
             }
 
@@ -174,6 +187,34 @@ $targets | ForEach-Object -Parallel {
     }
 } -ThrottleLimit $Concurrency
 
-# Summary
-Write-Host "`nScan completed.`n" -ForegroundColor Green
-Write-Host "Full log saved to: $Log" -ForegroundColor Cyan
+# ===================== Final Summary (مثل لینوکس) =====================
+$OK_COUNT = (Select-String -Path $Log -Pattern "^\[OK\]" -AllMatches).Count
+$FAIL_COUNT = (Select-String -Path $Log -Pattern "^\[FAIL\]" -AllMatches).Count
+$FILTERED_COUNT = (Select-String -Path $Log -Pattern "^\[FILTERED\]" -AllMatches).Count
+$ERROR_COUNT = (Select-String -Path $Log -Pattern "^\[ERROR\]" -AllMatches).Count
+
+@"
+
+---------------------------------------------------
+===================================================
+                   FINAL SUMMARY                   
+===================================================
+
+=== OK (at least one open port) [$OK_COUNT] ===
+$((Get-Content $Log | Where-Object { $_ -match '^\[OK\]' }) -join "`n")
+
+=== FAIL (all ports closed) [$FAIL_COUNT] ===
+$((Get-Content $Log | Where-Object { $_ -match '^\[FAIL\]' }) -join "`n")
+
+=== RESOLVE FAILED [$ERROR_COUNT] ===
+$((Get-Content $Log | Where-Object { $_ -match '^\[ERROR\]' }) -join "`n")
+
+=== FILTERED (Blocked/IP 10.x) [$FILTERED_COUNT] ===
+$((Get-Content $Log | Where-Object { $_ -match '^\[FILTERED\]' }) -join "`n")
+
+---------------------------------------------------
+Scan fully completed at $(Get-Date)
+"@ | Out-File $Log -Append -Encoding UTF8
+
+Write-Host "`nFull scan activity and summary saved to: $Log" -ForegroundColor Green
+Write-Host "Done!" -ForegroundColor Cyan
