@@ -1,4 +1,4 @@
-# SNI Scanner for Windows - Clean Version
+# SNI Scanner for Windows - Clean Version (No Special Characters)
 
 param(
     [string]$File = "targets.txt",
@@ -17,13 +17,12 @@ Write-Host "         SNI Scanner - Windows           " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ====================== Auto Setup ======================
+# Auto Setup
 function Install-Dependencies {
     Write-Host "Checking prerequisites..." -ForegroundColor Yellow
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         Write-Host "Error: PowerShell 7 or higher is required." -ForegroundColor Red
-        Write-Host "Please install PowerShell 7 and run again." -ForegroundColor Yellow
         exit 1
     } else {
         Write-Host "PowerShell $($PSVersionTable.PSVersion) detected." -ForegroundColor Green
@@ -33,26 +32,22 @@ function Install-Dependencies {
         Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
         @"
 # Enter one domain or IP per line
-# Lines starting with # will be ignored
-
 example.com
 sub.example.com
 185.22.34.56
 "@ | Out-File -FilePath $File -Encoding UTF8
-        Write-Host "Sample targets.txt created." -ForegroundColor Green
     }
 
     if (Test-Path $Log) { Clear-Content $Log -Force }
-    
-    Write-Host "All prerequisites are ready.`n" -ForegroundColor Green
+    Write-Host "Ready.`n" -ForegroundColor Green
 }
 
 Install-Dependencies
 
-# ====================== Configuration ======================
+# Configuration
 $Concurrency = 25
 
-# ====================== Helper Functions ======================
+# Functions
 function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -62,35 +57,20 @@ function Write-Log {
 
 function Get-PublicIP {
     param([string]$Manual = "")
-    
     if ($Manual) { 
         Write-Host "Using Manual IP: $Manual" -ForegroundColor Cyan
         return $Manual 
     }
-    
     Write-Host "Detecting your public IP..." -ForegroundColor Cyan
-    
-    $apis = @(
-        "http://chabokan.net/ip/",
-        "https://api.ipify.org?format=json",
-        "https://ipinfo.io/json"
-    )
-
+    $apis = @("http://chabokan.net/ip/", "https://api.ipify.org?format=json", "https://ipinfo.io/json")
     foreach ($api in $apis) {
         try {
             $r = Invoke-WebRequest -Uri $api -TimeoutSec 10 -UseBasicParsing
-            if ($api -like "*chabokan*") { 
-                $ip = ($r.Content | ConvertFrom-Json).ip 
-            }
-            elseif ($api -like "*ipify*") { 
-                $ip = ($r.Content | ConvertFrom-Json).ip 
-            }
-            else { 
-                $ip = ($r.Content | ConvertFrom-Json).ip 
-            }
-            
+            if ($api -like "*chabokan*") { $ip = ($r.Content | ConvertFrom-Json).ip }
+            elseif ($api -like "*ipify*") { $ip = ($r.Content | ConvertFrom-Json).ip }
+            else { $ip = ($r.Content | ConvertFrom-Json).ip }
             if ($ip) {
-                Write-Host "Public IP detected: $ip" -ForegroundColor Green
+                Write-Host "Public IP: $ip" -ForegroundColor Green
                 return $ip
             }
         } catch {}
@@ -104,7 +84,6 @@ function Check-Port {
     $tcp = New-Object System.Net.Sockets.TcpClient
     $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
     $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
-    
     if ($wait) {
         try { $tcp.EndConnect($connect) | Out-Null } catch {}
         $tcp.Close()
@@ -118,25 +97,13 @@ function Check-Port {
 function Check-RealIP {
     param($Domain, $IP, $PublicIP)
     try {
-        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" `
-            -Headers @{"Host" = $Domain} `
-            -TimeoutSec 12 `
-            -SkipCertificateCheck `
-            -UseBasicParsing
-
+        $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" -Headers @{"Host"=$Domain} -TimeoutSec 12 -SkipCertificateCheck -UseBasicParsing
         $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
-        
-        if ($detected -eq $PublicIP) {
-            return " IP-OK"
-        } else {
-            return " IP-X($detected)"
-        }
-    } catch {
-        return " IP-X"
-    }
+        if ($detected -eq $PublicIP) { return " IP-OK" } else { return " IP-X($detected)" }
+    } catch { return " IP-X" }
 }
 
-# ====================== Start Scan ======================
+# Main Scan
 $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 
 $PublicIP = $null
@@ -147,7 +114,7 @@ if ($IPCheck) {
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
-Write-Log "Scan started | Targets: $File | Ports: $Ports | Timeout: ${Timeout}s | Retries: $Retries"
+Write-Log "Scan started | Targets: $File | Ports: $Ports"
 
 $targets | ForEach-Object -Parallel {
     $target = $_
@@ -187,7 +154,6 @@ $targets | ForEach-Object -Parallel {
                         break
                     }
                 }
-
                 if ($isOpen) {
                     $resultStr += " ${port}-OK"
                     $openCount++
@@ -197,54 +163,17 @@ $targets | ForEach-Object -Parallel {
             }
 
             if ($openCount -gt 0) {
-                $ipResult = ""
-                if ($IPCheck -and $PublicIP) {
-                    $ipResult = Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP
-                }
+                $ipResult = if ($IPCheck -and $PublicIP) { Check-RealIP -Domain $target -IP $ip -PublicIP $PublicIP } else { "" }
                 "[OK] $resultStr$ipResult" | Out-File $Log -Append -Encoding UTF8
             } else {
                 "[FAIL] $resultStr" | Out-File $Log -Append -Encoding UTF8
             }
         }
     } catch {
-        "[ERROR] $target - $($_.Exception.Message)" | Out-File $Log -Append -Encoding UTF8
+        "[ERROR] $target" | Out-File $Log -Append -Encoding UTF8
     }
 } -ThrottleLimit $Concurrency
 
-# ====================== Final Summary ======================
-Write-Host "`nScan completed. Generating summary..." -ForegroundColor Yellow
-
-$logContent = Get-Content $Log -Raw
-
-$OKCount       = ([regex]::Matches($logContent, '\[OK\]')).Count
-$FAILCount     = ([regex]::Matches($logContent, '\[FAIL\]')).Count
-$ERRORCount    = ([regex]::Matches($logContent, '\[ERROR\]')).Count
-$FILTEREDCount = ([regex]::Matches($logContent, '\[FILTERED\]')).Count
-
-Write-Host "`n===================================================" -ForegroundColor Cyan
-Write-Host "                   FINAL SUMMARY                    " -ForegroundColor Cyan
-Write-Host "===================================================" -ForegroundColor Cyan
-
-if ($OKCount -gt 0) {
-    Write-Host "`n=== OK [$OKCount] ===" -ForegroundColor Green
-    Get-Content $Log | Where-Object { $_ -like "[OK]*" }
-}
-
-if ($FAILCount -gt 0) {
-    Write-Host "`n=== FAIL [$FAILCount] ===" -ForegroundColor Red
-    Get-Content $Log | Where-Object { $_ -like "[FAIL]*" }
-}
-
-if ($ERRORCount -gt 0) {
-    Write-Host "`n=== RESOLVE FAILED [$ERRORCount] ===" -ForegroundColor Yellow
-    Get-Content $Log | Where-Object { $_ -like "[ERROR]*" }
-}
-
-if ($FILTEREDCount -gt 0) {
-    Write-Host "`n=== FILTERED [$FILTEREDCount] ===" -ForegroundColor Yellow
-    Get-Content $Log | Where-Object { $_ -like "[FILTERED]*" }
-}
-
-Write-Host "`n===================================================" -ForegroundColor Cyan
-Write-Host "Scan finished at $(Get-Date)" -ForegroundColor Cyan
-Write-Host "Full results saved to: $Log" -ForegroundColor Cyan
+# Summary
+Write-Host "`nScan completed.`n" -ForegroundColor Green
+Write-Host "Full log saved to: $Log" -ForegroundColor Cyan
