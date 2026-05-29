@@ -1,12 +1,12 @@
 # =========================================
-#   SNI Scanner - Windows (نسخه نهایی)
+#   SNI Scanner - Windows (نسخه نهایی و ثابت)
 # =========================================
 
 param(
     [string]$File = "targets.txt",
     [string]$Ports = "443,2053,2083,2087,2096,8443",
-    [int]$Timeout = 4,      # کاهش یافته
-    [int]$Retries = 1,      # کاهش یافته
+    [int]$Timeout = 4,
+    [int]$Retries = 1,
     [string]$Log = "scan_log.txt",
     [string]$CsvOutput = "scan_results.csv",
     [switch]$IPCheck,
@@ -29,7 +29,6 @@ $PortList = $Ports -split ',' | ForEach-Object { $_.Trim() }
 if (-not (Test-Path $File)) {
     Write-Host "Creating sample targets.txt ..." -ForegroundColor Yellow
     @"
-# Put your domains or IPs here (one per line)
 1.1.1.1
 cloudflare.com
 google.com
@@ -41,6 +40,7 @@ google.com
 
 if (Test-Path $Log) { Clear-Content $Log -Force }
 
+# ===================== Functions =====================
 function Check-Port {
     param($IP, $Port, $TimeoutSec)
     try {
@@ -84,10 +84,33 @@ if ($IPCheck) {
 $targets = Get-Content $File | Where-Object { $_ -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() }
 
 Write-Host "Starting scan of $($targets.Count) targets..." -ForegroundColor Yellow
-Write-Host "Timeout: ${Timeout}s | Retries: $Retries | Parallel: 10`n" -ForegroundColor DarkGray
+Write-Host "Timeout: ${Timeout}s | Retries: $Retries | Parallel: 12`n" -ForegroundColor DarkGray
 
 $results = $targets | ForEach-Object -Parallel {
-    $target = $_
+    param($target)   # مهم: دریافت پارامتر
+
+    # دوباره تعریف کردن توابع داخل Parallel
+    function Check-Port {
+        param($IP, $Port, $TimeoutSec)
+        try {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $connect = $tcp.BeginConnect($IP, $Port, $null, $null)
+            $wait = $connect.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)
+            if ($wait) { $tcp.EndConnect($connect) | Out-Null }
+            $tcp.Close()
+            return $true
+        } catch { return $false }
+    }
+
+    function Check-RealIP {
+        param($Domain, $PublicIP)
+        try {
+            $result = Invoke-WebRequest -Uri "https://$Domain/cdn-cgi/trace" -Headers @{"Host"=$Domain} -TimeoutSec 8 -SkipCertificateCheck -UseBasicParsing
+            $detected = ($result.Content -split "`n" | Where-Object { $_ -like "ip=*" } | Select-Object -First 1) -replace "ip=", ""
+            if ($detected -eq $PublicIP) { " IP✔" } else { " IP✖($detected)" }
+        } catch { " IP✖" }
+    }
+
     $PortList = $using:PortList
     $Timeout = $using:Timeout
     $Retries = $using:Retries
@@ -101,7 +124,7 @@ $results = $targets | ForEach-Object -Parallel {
         if ($target -match '^\d{1,3}(\.\d{1,3}){3}$') {
             $ips = @($target)
         } else {
-            $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction Stop).IPAddress
+            $ips = (Resolve-DnsName -Name $target -Type A -ErrorAction SilentlyContinue).IPAddress
         }
 
         if (-not $ips) {
@@ -119,14 +142,7 @@ $results = $targets | ForEach-Object -Parallel {
             $openCount = 0
 
             foreach ($port in $PortList) {
-                $isOpen = $false
-                for ($i = 1; $i -le $Retries; $i++) {
-                    if (Check-Port -IP $ip -Port $port -TimeoutSec $Timeout) {
-                        $isOpen = $true
-                        break
-                    }
-                }
-                if ($isOpen) {
+                if (Check-Port -IP $ip -Port $port -TimeoutSec $Timeout) {
                     $resultStr += " ${port}✔"
                     $openCount++
                 } else {
@@ -148,7 +164,7 @@ $results = $targets | ForEach-Object -Parallel {
     catch {
         "[ERROR] $target - $($_.Exception.Message)"
     }
-} -ThrottleLimit 10
+} -ThrottleLimit 12
 
 # نمایش و ذخیره نتایج
 $results | ForEach-Object {
@@ -156,33 +172,19 @@ $results | ForEach-Object {
     Write-Host $_
 }
 
-# CSV Report
+# CSV Export
 $results | ForEach-Object {
-    if ($_ -match '^\[(.+?)\]\s*(.+?)\s*->\s*([\d\.:]+)\s*->(.+)$') {
+    if ($_ -match '^\[(.+?)\]\s*(.+?)\s*->\s*([^\s]+)\s*->(.+)$') {
         [PSCustomObject]@{
             Status = $matches[1]
             Target = $matches[2].Trim()
             IP     = $matches[3]
             Ports  = $matches[4].Trim()
-            Time   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Time   = Get-Date
         }
     }
 } | Export-Csv -Path $CsvOutput -NoTypeInformation -Encoding UTF8
 
-# Summary
-$OK_COUNT = ($results | Where-Object { $_ -match '^\[OK\]' }).Count
-$FAIL_COUNT = ($results | Where-Object { $_ -match '^\[FAIL\]' }).Count
-$ERROR_COUNT = ($results | Where-Object { $_ -match '^\[ERROR\]' }).Count
-
-@"
-===================================================
-                  FINAL SUMMARY
-===================================================
-OK     : $OK_COUNT
-FAIL   : $FAIL_COUNT  
-ERROR  : $ERROR_COUNT
-
-Scan completed at $(Get-Date)
-"@ | Out-File $Log -Append -Encoding UTF8
-
-Write-Host "`nScan completed! Check $CsvOutput for detailed report." -ForegroundColor Green
+Write-Host "`nScan completed successfully!" -ForegroundColor Green
+Write-Host "Log: $Log" -ForegroundColor Cyan
+Write-Host "CSV: $CsvOutput" -ForegroundColor Cyan
