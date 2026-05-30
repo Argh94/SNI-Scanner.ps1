@@ -34,7 +34,7 @@
 PowerShell را **به عنوان Administrator** باز کنید و دستور زیر را اجرا کنید:
 
 ```powershell
-winget install --id Microsoft.PowerShell -e --source winget
+winget install --id Microsoft.PowerShell -e --source winget```
 
 پس از نصب، نسخه را بررسی کنید:
 
